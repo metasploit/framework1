@@ -1,0 +1,8 @@
+ MetaSploit Framework TODO 
+===========================
+
+* Parameters are not validated sufficiently in all modules
+* ShellCache hashing function needs to be rewritten
+* Missing SSL support for all web exploits
+* The SuperSC Pex method needs to be completed
+
